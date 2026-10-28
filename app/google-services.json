@@ -1,0 +1,49 @@
+{
+  "project_info": {
+    "project_number": "427927725897",
+    "firebase_url": "https://prueba-2-e60c5-default-rtdb.firebaseio.com",
+    "project_id": "prueba-2-e60c5",
+    "storage_bucket": "prueba-2-e60c5.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:427927725897:android:be96312ef69c996eb65c98",
+        "android_client_info": {
+          "package_name": "com.example.arduinobeta"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDuW0v1H72iTB64-0N_yLD7n76HZAtA4D4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:427927725897:android:585b654dcf560b98b65c98",
+        "android_client_info": {
+          "package_name": "com.example.myapplication"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDuW0v1H72iTB64-0N_yLD7n76HZAtA4D4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
