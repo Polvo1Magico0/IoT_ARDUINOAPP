@@ -128,18 +128,18 @@ class MainActivity : AppCompatActivity() {
                 // La nueva duración se toma al comenzar cada ciclo.
                 val duracionDelCiclo = tiempoEspera
 
-                if (duracionDelCiclo <= 0) {
-                    arduinoRef.child("tiempo_restante").setValue(0)
-                    delay(500)
-                    continue
-                }
+                //if (duracionDelCiclo <= 0) {
+                    //arduinoRef.child("tiempo_restante").setValue(0)
+                    //delay(500)
+                    //continue
+                //}
 
-                for (segundos in duracionDelCiclo downTo 1) {
-                    arduinoRef.child("tiempo_restante").setValue(segundos)
-                    delay(1000)
-                }
+                //for (segundos in duracionDelCiclo downTo 1) {
+                    //arduinoRef.child("tiempo_restante").setValue(segundos)
+                    //delay(1000)
+                //}
 
-                arduinoRef.child("tiempo_restante").setValue(0)
+                //arduinoRef.child("tiempo_restante").setValue(0)
 
                 val porcionAutomaticaTerminada = CompletableDeferred<Unit>()
                 colaDispensado.send(
