@@ -34,27 +34,27 @@ class MainActivity : AppCompatActivity() {
     private lateinit var arduinoRef: DatabaseReference
     private lateinit var dispensadorRef: DatabaseReference
 
-    // El temporizador y el procesador de órdenes funcionan independientemente.
+    // El reloj y el procesador de órdenes funcionan por separado.
     private var relojJob: Job? = null
     private var procesadorJob: Job? = null
 
-    // Las solicitudes se procesan de una en una.
+    // Todas las porciones se procesan en orden, una a la vez.
     private val colaDispensado = Channel<SolicitudDispensado>(Channel.UNLIMITED)
 
     private var tiempoEspera = 10
     private var bloqueoActivo = false
     private var gramosObjetivo = 0
 
-    // Valor del simulador, controlado por el CheckBox.
+    // Estado simulado del sensor, controlado por el CheckBox.
     private var comidaDisponible = true
     private var ultimoEstadoComidaPublicado: Boolean? = null
 
-    // Gramos que ya hay en el plato. Se recuperan de Firebase al iniciar.
+    // Cantidad actual en el plato, leída y guardada en Firebase.
     private var gramosActualesEnPlato = 0
     private val gramosInicialesCargados = CompletableDeferred<Unit>()
     private var dispensadoEnCurso = false
 
-    // Evita encolar varias veces una misma orden manual.
+    // Evita encolar repetidamente una misma orden manual.
     private var ordenManualYaEncolada = false
 
     private fun actualizarTextoComida() {
@@ -83,10 +83,7 @@ class MainActivity : AppCompatActivity() {
         Log.d("AppArduino", "Comida disponible: $disponible")
     }
 
-    /**
-     * Escucha gramos_actual para reflejar cambios en pantalla.
-     * Este listener NO crea órdenes de dispensado.
-     */
+    /** Escucha los gramos del plato y actualiza la interfaz. No genera órdenes. */
     private fun escucharGramosActuales() {
         arduinoRef.child("gramos_actual")
             .addValueEventListener(object : ValueEventListener {
@@ -95,14 +92,16 @@ class MainActivity : AppCompatActivity() {
                         0,
                         snapshot.getValue(Int::class.javaObjectType) ?: 0
                     )
+
                     gramosActualesEnPlato = nuevoValor
                     actualizarTextoComida()
                     gramosInicialesCargados.complete(Unit)
 
-                    Log.d("AppArduino", "Gramos actuales en el plato: $gramosActualesEnPlato")
-
-                    // Importante: cambiar los gramos del plato solo sincroniza el estado.
-                    // No debe iniciar un dispensado; eso requiere una orden manual o el timer.
+                    Log.d(
+                        "AppArduino",
+                        "Gramos actuales en el plato: $gramosActualesEnPlato"
+                    )
+                    // Modificar los gramos solo sincroniza el estado. No dispensa.
                 }
 
                 override fun onCancelled(error: DatabaseError) {
@@ -117,47 +116,82 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Cuenta atrás automática. Las órdenes manuales no la reinician ni la pausan.
-     * Al llegar a cero, encola una porción automática y espera a que se complete.
+     * Ejecuta ciclos automáticos. Cada ciclo hace la cuenta atrás, encola una sola
+     * orden automática al llegar a cero y espera a que esa orden se procese antes
+     * de comenzar el siguiente ciclo. Las órdenes manuales no reinician ni pausan
+     * la cuenta atrás.
      */
     private fun iniciarTemporizadorAutomatico() {
         if (relojJob?.isActive == true) return
 
         relojJob = lifecycleScope.launch {
             while (isActive) {
-                // La nueva duración se toma al comenzar cada ciclo.
+                // La duración se fija al inicio de cada ciclo.
                 val duracionDelCiclo = tiempoEspera
 
-                //if (duracionDelCiclo <= 0) {
-                    //arduinoRef.child("tiempo_restante").setValue(0)
-                    //delay(500)
-                    //continue
-                //}
+                if (duracionDelCiclo <= 0) {
+                    arduinoRef.child("tiempo_restante").setValue(0)
+                    Log.w(
+                        "AppArduino",
+                        "Duración de temporizador inválida: $duracionDelCiclo. " +
+                                "Se volverá a revisar en 1 segundo."
+                    )
+                    delay(1000)
+                    continue
+                }
 
-                //for (segundos in duracionDelCiclo downTo 1) {
-                    //arduinoRef.child("tiempo_restante").setValue(segundos)
-                    //delay(1000)
-                //}
+                // Cuenta regresiva real: actualiza Firebase cada segundo.
+                for (segundos in duracionDelCiclo downTo 1) {
+                    if (!isActive) break
 
-                //arduinoRef.child("tiempo_restante").setValue(0)
+                    arduinoRef.child("tiempo_restante")
+                        .setValue(segundos)
+                        .addOnFailureListener { error ->
+                            Log.e(
+                                "AppArduino",
+                                "Error al actualizar el tiempo restante",
+                                error
+                            )
+                        }
+
+                    delay(1000)
+                }
+
+                if (!isActive) break
+
+                // El ciclo llegó a cero. Publicarlo y crear UNA orden automática.
+                arduinoRef.child("tiempo_restante").setValue(0)
+                Log.d("AppArduino", "Temporizador terminado; encolando orden automática")
 
                 val porcionAutomaticaTerminada = CompletableDeferred<Unit>()
-                colaDispensado.send(
-                    SolicitudDispensado(
-                        gramosObjetivo = gramosObjetivo,
-                        automatica = true,
-                        completado = porcionAutomaticaTerminada
-                    )
+                val solicitudAutomatica = SolicitudDispensado(
+                    gramosObjetivo = gramosObjetivo,
+                    automatica = true,
+                    completado = porcionAutomaticaTerminada
                 )
 
-                // Una porción automática debe terminar antes de que empiece
-                // el siguiente ciclo automático. Una orden manual no modifica
-                // el conteo; el reloj sigue durante la dispensación manual.
-                porcionAutomaticaTerminada.await()
+                val resultado = colaDispensado.trySend(solicitudAutomatica)
+                if (resultado.isSuccess) {
+                    // Espera a que termine esta orden antes de iniciar el siguiente ciclo.
+                    // Si una orden manual está delante en la cola, se atiende primero.
+                    porcionAutomaticaTerminada.await()
+                    Log.d(
+                        "AppArduino",
+                        "Ciclo automático completado; comenzará la siguiente cuenta atrás"
+                    )
+                } else {
+                    Log.e(
+                        "AppArduino",
+                        "No se pudo encolar la orden automática",
+                        resultado.exceptionOrNull()
+                    )
+                    delay(1000)
+                }
             }
         }
     }
 
+    /** Consume la cola de solicitudes secuencialmente. */
     private fun iniciarProcesadorDeOrdenes() {
         if (procesadorJob?.isActive == true) return
 
@@ -167,8 +201,7 @@ class MainActivity : AppCompatActivity() {
                     val txtDispensador =
                         findViewById<TextView>(R.id.mensaje_dispensador)
 
-                    // Una orden queda en espera mientras el bloqueo esté activo
-                    // o el CheckBox indique que no hay comida disponible.
+                    // Esperar mientras el dispensador esté bloqueado o no haya comida.
                     while (isActive && (bloqueoActivo || !comidaDisponible)) {
                         txtDispensador.text = when {
                             bloqueoActivo -> "Dispensador bloqueado"
@@ -179,22 +212,43 @@ class MainActivity : AppCompatActivity() {
 
                     if (!isActive) break
 
-                    if (solicitud.gramosObjetivo <= 0) {
-                        txtDispensador.text = "Objetivo de gramos inválido"
-                        Log.e(
-                            "AppArduino",
-                            "Objetivo inválido: ${solicitud.gramosObjetivo}"
-                        )
-                    } else {
-                        val origen = if (solicitud.automatica) "automática" else "manual"
-                        Log.d(
-                            "AppArduino",
-                            "Procesando orden $origen; objetivo=${solicitud.gramosObjetivo}, " +
-                                    "actual=$gramosActualesEnPlato"
-                        )
-                        dispensarPorcion(solicitud.gramosObjetivo)
+                    val objetivoDeEstaOrden = solicitud.gramosObjetivo
+                    when {
+                        objetivoDeEstaOrden <= 0 -> {
+                            txtDispensador.text = "Objetivo de gramos inválido"
+                            Log.e(
+                                "AppArduino",
+                                "Objetivo inválido: $objetivoDeEstaOrden"
+                            )
+                        }
+
+                        gramosActualesEnPlato >= objetivoDeEstaOrden -> {
+                            // No dispensar si ya se alcanzó el objetivo.
+                            txtDispensador.text = "Objetivo de comida alcanzado"
+                            Log.d(
+                                "AppArduino",
+                                "Orden ${if (solicitud.automatica) "automática" else "manual"} " +
+                                        "ignorada: hay $gramosActualesEnPlato g, " +
+                                        "objetivo $objetivoDeEstaOrden g"
+                            )
+                        }
+
+                        else -> {
+                            val origen = if (solicitud.automatica) "automática" else "manual"
+                            Log.d(
+                                "AppArduino",
+                                "Procesando orden $origen; objetivo=$objetivoDeEstaOrden, " +
+                                        "actual=$gramosActualesEnPlato"
+                            )
+                            dispensarPorcion(objetivoDeEstaOrden)
+                        }
                     }
+                } catch (error: Exception) {
+                    Log.e("AppArduino", "Error al procesar una orden", error)
+                    findViewById<TextView>(R.id.mensaje_dispensador).text =
+                        "Error al procesar orden"
                 } finally {
+                    // El reloj automático puede continuar después de que esta orden finalice.
                     solicitud.completado?.complete(Unit)
                 }
             }
@@ -212,14 +266,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Dispensar hasta alcanzar el objetivo absoluto del plato.
-     * Ejemplo: si ya hay 155 g y el objetivo es 200 g, empieza en 155 g
-     * y añade únicamente los 45 g restantes.
-     */
+    /** Dispensa hasta el objetivo absoluto, usando los gramos que ya hay en el plato. */
     private suspend fun dispensarPorcion(gramosObjetivoPorcion: Int) {
         gramosInicialesCargados.await()
-
         if (gramosObjetivoPorcion <= 0) return
 
         val txtDispensador = findViewById<TextView>(R.id.mensaje_dispensador)
@@ -228,14 +277,14 @@ class MainActivity : AppCompatActivity() {
 
         actualizarTextoComida()
 
-        // Si el plato ya alcanzó o superó el objetivo, no volver a dispensar.
         if (gramosActualesEnPlato >= gramosObjetivoPorcion) {
             txtDispensador.text = "Objetivo ya alcanzado"
             arduinoRef.child("dispensado_comida").setValue(false)
             arduinoRef.child("comida_dispensada_lista").setValue(true)
             Log.d(
                 "AppArduino",
-                "No se dispensa: ya hay $gramosActualesEnPlato g, objetivo $gramosObjetivoPorcion g"
+                "No se dispensa: ya hay $gramosActualesEnPlato g, " +
+                        "objetivo $gramosObjetivoPorcion g"
             )
             return
         }
@@ -246,7 +295,6 @@ class MainActivity : AppCompatActivity() {
 
         try {
             while (gramosActualesEnPlato < gramosObjetivoPorcion) {
-                // Bloqueo/disponibilidad se comprueban durante toda la porción.
                 esperarPermisoParaDispensar(txtDispensador)
 
                 txtDispensador.text = "Dispensando."
@@ -262,8 +310,7 @@ class MainActivity : AppCompatActivity() {
                 val incrementoReal = minOf(gramosPorVuelta, gramosRestantes)
                 gramosActualesEnPlato += incrementoReal
 
-                txtComidaCuenta.text =
-                    "$gramosActualesEnPlato/$gramosObjetivoPorcion"
+                txtComidaCuenta.text = "$gramosActualesEnPlato/$gramosObjetivoPorcion"
 
                 arduinoRef.child("gramos_actual")
                     .setValue(gramosActualesEnPlato)
@@ -298,10 +345,9 @@ class MainActivity : AppCompatActivity() {
         dispensadorRef = database.getReference("dispensador")
         arduinoRef = database.getReference("arduino")
 
-        // Escuchar los gramos del plato. Esto también detecta cambios hechos directamente en Firebase.
         escucharGramosActuales()
 
-        // El CheckBox controla el estado simulado del sensor de comida.
+        // El CheckBox representa el sensor de comida del simulador.
         val checkComidaDisponible =
             findViewById<CheckBox>(R.id.check_comida_disponible)
         checkComidaDisponible.isChecked = comidaDisponible
@@ -310,7 +356,7 @@ class MainActivity : AppCompatActivity() {
         }
         actualizarComidaDisponible(checkComidaDisponible.isChecked)
 
-        // Control manual para ajustar los gramos del plato SIN dispensar.
+        // Permite ajustar el peso del plato sin generar ninguna orden.
         val inputGramosPlato = findViewById<EditText>(R.id.input_gramos_plato)
         val btnActualizarPlato = findViewById<Button>(R.id.btn_actualizar_plato)
         btnActualizarPlato.setOnClickListener {
@@ -337,7 +383,6 @@ class MainActivity : AppCompatActivity() {
                 .addOnSuccessListener {
                     inputGramosPlato.text.clear()
                     Log.d("AppArduino", "Plato ajustado manualmente a $nuevoValor g")
-
                     findViewById<TextView>(R.id.mensaje_dispensador).text =
                         "Plato actualizado. Sin iniciar dispensado."
                 }
@@ -350,7 +395,7 @@ class MainActivity : AppCompatActivity() {
 
         iniciarProcesadorDeOrdenes()
 
-        // Estado de conexión del simulador.
+        // Publicar el estado de conexión del simulador.
         val estadoRef = database.getReference("dispensador/estado_simulador")
         val conexionRef = database.getReference(".info/connected")
 
@@ -378,7 +423,7 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        // Leer órdenes y configuración de la aplicación principal.
+        // Leer las órdenes y la configuración de la app principal.
         dispensadorRef.addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 bloqueoActivo = snapshot.child("bloqueo_activo")
@@ -400,7 +445,7 @@ class MainActivity : AppCompatActivity() {
 
                 actualizarTextoComida()
 
-                // Detectar false -> true para encolar la orden manual una vez.
+                // Encolar la orden manual una sola vez cuando cambia de false a true.
                 if (ordenManual && !ordenManualYaEncolada) {
                     ordenManualYaEncolada = true
 
@@ -412,27 +457,28 @@ class MainActivity : AppCompatActivity() {
                     )
 
                     if (resultado.isSuccess) {
+                        // Consumir la señal; el procesador ya tiene la solicitud en la cola.
                         dispensadorRef.child("dispensar_ahora").setValue(false)
                     } else {
                         ordenManualYaEncolada = false
-                        Log.e("AppArduino", "No se pudo encolar la orden manual")
+                        Log.e(
+                            "AppArduino",
+                            "No se pudo encolar la orden manual",
+                            resultado.exceptionOrNull()
+                        )
                     }
                 } else if (!ordenManual) {
                     ordenManualYaEncolada = false
                 }
 
-                // Iniciar el reloj una sola vez; cambios del listener no lo reinician.
+                // El temporizador se inicia una sola vez. Cambios de Firebase no lo reinician.
                 if (relojJob?.isActive != true) {
                     iniciarTemporizadorAutomatico()
                 }
             }
 
             override fun onCancelled(error: DatabaseError) {
-                Log.e(
-                    "AppArduino",
-                    "Error al leer Firebase",
-                    error.toException()
-                )
+                Log.e("AppArduino", "Error al leer Firebase", error.toException())
             }
         })
 
@@ -446,5 +492,12 @@ class MainActivity : AppCompatActivity() {
             )
             insets
         }
+    }
+
+    override fun onDestroy() {
+        relojJob?.cancel()
+        procesadorJob?.cancel()
+        colaDispensado.close()
+        super.onDestroy()
     }
 }
